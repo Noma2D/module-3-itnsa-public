@@ -1,0 +1,136 @@
+env_vars:
+  HOST_1: "{{ INSTANCE_1 }}"
+  HOST_2: "{{ INSTANCE_2 }}"
+  HOST_3: "{{ INSTANCE_3 }}"
+  COMPETITOR_ID: "{{ COMPETITOR }}"
+  HOSTN_1: "{{ HOSTNAME_1 }}"
+  HOSTN_2: "{{ HOSTNAME_2 }}"
+  HOSTN_3: "{{ HOSTNAME_3 }}"
+- name: Установка Git
+  hosts: all
+  become: true
+  tasks:
+    - name: Скачиваем Git
+      apt:
+        name: git
+        state: latest
+    - name: Копирование приложения
+      ansible.builtin.git:
+        repo: https://github.com/Noma2D/app
+        dest: /app
+- name: Установка GlusterFS для обмена данных образами приложения
+  hosts: all
+  become: true
+  gather_facts: yes
+  tasks:
+  - name: Install Latest Python Package
+    apt:
+      name: python
+      state: latest
+  - name: Install Latest GlusterFS Package
+    apt:
+      state: latest
+      name:
+      - glusterfs
+      - ncdu
+  - name: Add Nodes to /etc/hosts File
+    blockinfile:
+      path: /etc/hosts
+      block: |
+        "{{ HOST_1 }}" "{{ HOSTN_1 }}"
+        "{{ HOST_2 }}" "{{ HOSTN_2 }}"
+        "{{ HOST_3 }}" "{{ HOSTN_3 }}"
+  - name: Create a trusted storage pool
+    gluster.gluster.gluster_peer:
+      state: present
+      nodes:
+        - "{{ HOST_1 }}"
+        - "{{ HOST_2 }}"
+        - "{{ HOST_3 }}"
+  
+  - name: create gluster volume
+    gluster.gluster.gluster_volume:
+      state: present
+      name: app
+      bricks: /app/files
+      rebalance: yes
+      cluster:
+        - "{{ HOST_1 }}"
+        - "{{ HOST_2 }}"
+        - "{{ HOST_3 }}"
+  
+- name: Установка Docker  
+  hosts: all
+  become: true
+  tasks:
+  - name: Установка Python
+    raw: "apt-get install -y python-minimal python-pip"
+  - name: Установка всяких пакетов
+    become: yes
+    apt:
+      name: "{{ packagesdep }}"
+      force_apt_get: yes
+      state: latest
+      update_cache: yes
+    vars:
+      packagesdep:
+      - apt-transport-https
+      - ca-certificates
+      - wget
+      - software-properties-common
+      - gnupg2
+      - curl
+  - name: Всё-таки установить Docker
+    apt:
+      name: "docker-ce"
+      state: latest
+
+- name: Создание Docker Swarm 
+  hosts: swarm_master
+  gather_facts: yes
+  tasks:
+    - command: "docker swarm init --advertise-addr {{ HOSTN_1 }}"
+    - command: "docker swarm join-token -q worker"
+      register: swarm_token
+    - set_fact: swarmtoken="{{swarm_token.stdout}}"
+  
+- name: Вход в Docker Swarm
+  hosts: swarm_nodes
+  gather_facts: yes
+  tasks:
+  - command: "docker swarm join --advertise-addr {{ HOSTN_1 }} --token {{hostvars[groups['swarm-master'][0]].swarmtoken}} {{hostvars[groups['swarm-master'][0]].inventory_hostname}}:2377"
+
+- name: Создание образа контейнера
+  hosts: all
+  become: true
+  tasks:
+    - name: Создание образа
+      community.docker.docker_image:
+        name: app:latest
+        build: /app
+      state: present
+
+- name: Запуск контейнеров
+  hosts: all
+  become: true
+  tasks:
+    - name: Создание сети контейнеров
+      community.docker.docker_network:
+      name: appnet
+      ipam_config:
+        - subnet: 172.10.10.0/24
+    - name:
+      community.docker.docker_container:
+        name: "app"
+        image: app
+        state: present
+        working_dir: /app
+        ports:
+          - 80:80
+          - 443:443
+        env:
+          - COMPETITOR_ID = "{{ COMPETITOR_ID }}"
+        networks: 
+          - name: appnet
+        volumes:
+          - /app/files:/app
